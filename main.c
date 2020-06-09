@@ -1,12 +1,52 @@
+/**
+ * MEMORY ALLOCATOR BASED ON RED-BLACK TREE
+ * COMPLEXITY:
+ *     1) Allocation: O(log(L)), L - number of freed blocks
+ *     1) Freeing: O(log(L)),    L - number of freed blocks
+ * FEATURES:
+ *     1) Alignment
+ *     2) Merging space
+ *     3) Splitting space
+ *     4) Best-fit search
+ */
+
 #include <stdio.h>
+#include <stdlib.h>
+#include <assert.h>
 #include <unistd.h>
 #include <stdbool.h>
 #include <sys/mman.h>
-#include <assert.h>
 
-#include "sbrk.h"
+/**
+ * CUSTOM SBRK
+ */
 
-/* RED-BLACK TREE IMPLEMENTATION */
+void *arena;
+void *_brk = NULL;
+const size_t arena_size = 4 * 1024 * 1024;
+
+void *_sbrk(size_t size) {
+    if (!arena) {
+        arena = mmap(NULL, arena_size,
+                     PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (arena == (void *)-1) {
+            perror("mmap error");
+            exit(EXIT_FAILURE);
+        }
+        _brk = arena;
+    }
+    if (size == 0)
+        return _brk;
+    if (_brk + size >= arena + arena_size)
+        return (void *)-1;
+    _brk += size;
+    return (_brk - size);
+}
+
+/**
+ * RED-BLACK TREE
+ */
 
 typedef enum {
     RED, BLACK
@@ -23,12 +63,14 @@ typedef struct node {
 
     color_t color;
     size_t size;
+
     bool used;
 } node_t;
 
 typedef struct {
     node_t *root;
     node_t *NIL;
+    node_t *first_alloc;
     node_t *last_alloc;
 } rbt_t;
 
@@ -227,14 +269,16 @@ void remove_meta(rbt_t *tree, node_t *z) {
         remove_meta_fixup(tree, x);
 }
 
-/* MEMORY ALLOCATOR */
+/**
+ * ALLOCATOR
+ */
 
 typedef intptr_t word_t;
 typedef node_t meta_t;
 typedef rbt_t alloc_tree_t;
 
 #define META_SIZE sizeof(meta_t)
-#define SPLIT_SIZE sizeof(int) * 4
+#define SPLIT_SIZE sizeof(int) * 8
 
 alloc_tree_t *alloc_tree;
 
@@ -248,10 +292,7 @@ meta_t *get_meta(void *ptr) {
 
 meta_t *req_space(size_t size) {
     meta_t *block = _sbrk(size + META_SIZE);
-    if ((void *) block == (void *) -1) {
-        perror("sbrk error");
-        exit(EXIT_FAILURE);
-    }
+
     block->left = alloc_tree->NIL;
     block->right = alloc_tree->NIL;
     block->p = alloc_tree->NIL;
@@ -263,7 +304,7 @@ meta_t *req_space(size_t size) {
     block->used = true;
     block->size = size;
     block->color = RED;
-    insert_meta(alloc_tree, block);
+    alloc_tree->last_alloc = block;
     return block;
 }
 
@@ -299,7 +340,6 @@ void split_space(meta_t *last, size_t size) {
     last->size = size;
     alloc_tree->last_alloc = splitted;
 
-    insert_meta(alloc_tree, last);
     insert_meta(alloc_tree, splitted);
 }
 
@@ -308,6 +348,7 @@ void free_space(void *ptr) {
         return;
     meta_t *block = get_meta(ptr);
     block->used = false;
+    insert_meta(alloc_tree, block);
 
     if (block->prev != alloc_tree->NIL && !block->prev->used) {
         remove_meta(alloc_tree, block);
@@ -333,14 +374,14 @@ void free_space(void *ptr) {
     }
 }
 
-meta_t *alloc(size_t size) {
+void *alloc(size_t size) {
     if (size == 0)
         return (meta_t *) NULL;
     size = align(size);
     meta_t *allocated;
-    if (alloc_tree->root == alloc_tree->NIL) {
+    if (alloc_tree->first_alloc == alloc_tree->NIL) {
         allocated = req_space(size);
-        alloc_tree->root = allocated;
+        alloc_tree->first_alloc = allocated;
         alloc_tree->last_alloc = allocated;
     } else {
         meta_t *last = alloc_tree->root;
@@ -348,145 +389,85 @@ meta_t *alloc(size_t size) {
         if (allocated == alloc_tree->NIL)
             allocated = req_space(size);
         else {
-            if (allocated->size >= size + SPLIT_SIZE + META_SIZE)
+            if (allocated->size >= size + SPLIT_SIZE + META_SIZE)   // if can be splitted
                 split_space(allocated, size);
+            else
+                remove_meta(alloc_tree, allocated);
             allocated->used = true;
         }
     }
     return (allocated + 1);
 }
 
-alloc_tree_t *allocator_create() {
-    alloc_tree_t *allocator = _sbrk(sizeof(alloc_tree_t));
-    allocator->NIL = _sbrk(sizeof(meta_t));
+void *create_allocator() {
+    alloc_tree = _sbrk(sizeof(alloc_tree_t));
+    alloc_tree->NIL = _sbrk(sizeof(meta_t));
 
-    allocator->NIL->left = NULL;
-    allocator->NIL->right = NULL;
-    allocator->NIL->p = NULL;
-    allocator->NIL->prev = NULL;
-    allocator->NIL->next = NULL;
-    allocator->NIL->used = false;
-    allocator->NIL->color = BLACK;
-    allocator->NIL->size = 0;
+    alloc_tree->NIL->left = NULL;
+    alloc_tree->NIL->right = NULL;
+    alloc_tree->NIL->p = NULL;
+    alloc_tree->NIL->prev = NULL;
+    alloc_tree->NIL->next = NULL;
+    alloc_tree->NIL->used = false;
+    alloc_tree->NIL->color = BLACK;
+    alloc_tree->NIL->size = 0;
 
-    allocator->root = allocator->NIL;
-    allocator->last_alloc = allocator->NIL;
-
+    alloc_tree->root = alloc_tree->NIL;
+    alloc_tree->first_alloc = alloc_tree->NIL;
+    alloc_tree->last_alloc = alloc_tree->NIL;
 }
 
-void set_allocator(alloc_tree_t *t) {
-    alloc_tree = t;
+void *destroy_allocator() {
+    munmap(arena, arena_size);
+    arena = NULL;
+    _brk = NULL;
 }
-
-/** TEST RED-BLACK-TREE PROPERTIES **/
-
-meta_t *create_meta(size_t size) {
-    meta_t *meta = malloc(sizeof(meta_t));
-
-    meta->prev = NULL;
-    meta->next = NULL;
-
-    meta->left = NULL;
-    meta->right = NULL;
-    meta->p = NULL;
-
-    meta->color = BLACK;
-    meta->used = false;
-    meta->size = size;
-
-    return meta;
-}
-
-void test_color(meta_t *node) {
-    if (node == NULL)
-        return;
-    test_color(node->left);
-    test_color(node->right);
-    if (node->color == RED) {
-        if (node->left)
-            assert(node->left->color == BLACK);
-        if (node->right)
-            assert(node->right->color == BLACK);
-    }
-}
-
-void test_black_amount(meta_t *node, int should_be) {
-    static int count = 0;
-    if (node == NULL)
-        return;
-    if (node->color == BLACK)
-        ++count;
-    test_black_amount(node->left, should_be);
-    test_black_amount(node->right, should_be);
-    if (!node->left && !node->right)
-        assert(count == should_be);
-    if (node->color == BLACK)
-        --count;
-}
-
-void test_rbt_props(alloc_tree_t *tree) {
-    assert(tree->root->color == BLACK);
-    test_color(tree->root);
-
-    int count = 0;
-    meta_t *cur = tree->root;
-    while (cur != NULL) {
-        if (cur->color == BLACK)
-            ++count;
-        cur = cur->left;
-    }
-    test_black_amount(tree->root, count);
-}
-
-void test_rbt() {
-    meta_t *n1, *n2, *n3, *n4, *n5, *n6;
-    n1 = create_meta(41);
-    n2 = create_meta(38);
-    n3 = create_meta(31);
-    n4 = create_meta(12);
-    n5 = create_meta(19);
-    n6 = create_meta(8);
-    alloc_tree_t t;
-    t.NIL = create_meta(0);
-    t.root = t.NIL;
-    insert_meta(&t, n1);
-    test_rbt_props(&t);
-    insert_meta(&t, n2);
-    test_rbt_props(&t);
-    insert_meta(&t, n3);
-    test_rbt_props(&t);
-    insert_meta(&t, n4);
-    test_rbt_props(&t);
-    insert_meta(&t, n5);
-    test_rbt_props(&t);
-    insert_meta(&t, n6);
-    test_rbt_props(&t);
-    remove_meta(&t, n6);
-    test_rbt_props(&t);
-    remove_meta(&t, n4);
-    test_rbt_props(&t);
-    remove_meta(&t, n5);
-    test_rbt_props(&t);
-    remove_meta(&t, n3);
-    test_rbt_props(&t);
-    remove_meta(&t, n2);
-    test_rbt_props(&t);
-    remove_meta(&t, n1);
-    test_rbt_props(&t);
-}
-
-/** ============================== **/
-
-/** TEST ALLOCATOR **/
-
-void test_alloc() {
-
-}
-
-/** ============== **/
 
 int main() {
-    test_rbt();
-    test_alloc();
+    {
+        create_allocator();
+        int *arr = alloc(10 * sizeof(int));
+        assert(alloc_tree->root == alloc_tree->NIL);
+        int *arr2 = alloc(20 * sizeof(int));
+        assert(alloc_tree->root == alloc_tree->NIL);
+        assert(alloc_tree->first_alloc == get_meta(arr));
+        assert(alloc_tree->last_alloc == get_meta(arr2));
+        free_space(arr);
+        assert(alloc_tree->root == get_meta(arr));
+        assert(alloc_tree->root->size == 10 * sizeof(int));
+        free_space(arr2);
+        assert(alloc_tree->root == get_meta(arr));
+        assert(alloc_tree->root->size == 10 * sizeof(int) + META_SIZE + 20 * sizeof(int));
+        destroy_allocator();
+    }
+    {
+        create_allocator();
+        int *arr = alloc(10 * sizeof(int));
+        int *arr2 = alloc(10 * sizeof(int));
+        int *arr3 = alloc(10 * sizeof(int));
+        int *arr4 = alloc(10 * sizeof(int));
+        free_space(arr2);
+        free_space(arr4);
+        assert(alloc_tree->root == get_meta(arr2));
+        assert(alloc_tree->root->right == get_meta(arr4));
+        free_space(arr3);
+        assert(alloc_tree->root->size == (10 * sizeof(int)) * 3 + 2 * META_SIZE);
+        assert(alloc_tree->root->left == alloc_tree->NIL);
+        assert(alloc_tree->root->right == alloc_tree->NIL);
+        free_space(arr);
+        destroy_allocator();
+    }
+    {
+        create_allocator();
+        int *arr = alloc(1000 * sizeof(int));
+        free_space(arr);
+        int *arr2 = alloc(500 * sizeof(int));        // should split
+        assert(alloc_tree->root->size == 1000 * sizeof(int) - 500 * sizeof(int) - META_SIZE);
+        free_space(arr2);
+        int *arr3 = alloc(1000 * sizeof(int) - SPLIT_SIZE); // should not split
+        assert(alloc_tree->root == alloc_tree->NIL);
+        free_space(arr3);
+        destroy_allocator();
+    }
     return 0;
 }
